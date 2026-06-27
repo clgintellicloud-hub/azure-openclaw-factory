@@ -26,7 +26,14 @@ case "${ENV}" in
 esac
 
 CONTAINER_APP="${AGENT_NAME}-${ENV}"
-IMAGE="${ACR}.azurecr.io/${AGENT_NAME}:${IMAGE_TAG}"
+
+if [[ "${AGENT_NAME}" =~ ^openclaw-[0-9]+$ ]]; then
+  IMAGE_REPOSITORY="${OPENCLAW_IMAGE_REPOSITORY:-openclaw}"
+else
+  IMAGE_REPOSITORY="${AGENT_NAME}"
+fi
+
+IMAGE="${ACR}.azurecr.io/${IMAGE_REPOSITORY}:${IMAGE_TAG}"
 
 echo "=== Rolling back ${CONTAINER_APP} to ${IMAGE_TAG} ==="
 echo "Container App: ${CONTAINER_APP}"

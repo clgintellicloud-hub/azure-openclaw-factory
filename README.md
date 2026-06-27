@@ -16,6 +16,10 @@ agents/
     Dockerfile
     src/agent.js
     config/openclaw.json
+  openclaw/               # Generic OpenClaw agent image used by count-based apps
+    Dockerfile
+    src/agent.js
+    config/openclaw.json
 infra/
   bicep/                 # Infrastructure as Code (services)
     main.bicep           # Main orchestration
@@ -75,12 +79,14 @@ Go to **Actions -> openclaw-infra -> Run workflow** with:
 - **location**: Azure region (default: `eastus`)
 - **acr_sku**: ACR SKU (default: `Basic`)
 - **service_principal_object_id**: Your SP object ID (get via `az ad sp show --id <clientId> --query id`)
+- **openclaw_container_app_count**: Number of generic OpenClaw Container Apps to create per environment (default: `0`)
 
 This deploys:
 - Resource groups (`rg-openclaw-dev`, `rg-openclaw-prod`)
 - ACR (`ocrocagentdev`)
 - Container Apps environments
 - Container Apps (hermes-dev, analyst-dev, hermes-prod, analyst-prod)
+- Optional generic OpenClaw Container Apps (`openclaw-1-dev`, `openclaw-2-dev`, `openclaw-1-prod`, and so on)
 - Log Analytics workspace
 - All RBAC role assignments
 
@@ -96,6 +102,8 @@ Push to `main` or run the `openclaw-deploy` workflow manually. The flow is:
 
 Each agent image starts `openclaw gateway run` on internal port `19001` and exposes a small HTTP health endpoint on port `8080` for Azure Container Apps. The deployment stores `OPENCLAW_GATEWAY_TOKEN` as a Container App secret and passes it to OpenClaw at runtime.
 
+When deploying generic OpenClaw apps, use the same `openclaw_container_app_count` value that was used by the infrastructure workflow so the deploy workflow updates every numbered app that exists.
+
 ### Step 5: Configure Prod Environment Protection
 
 In **Repository Settings -> Environments -> prod**, add required reviewers.
@@ -107,6 +115,7 @@ Build the images locally:
 ```bash
 docker build -t azure-openclaw-hermes:test agents/hermes
 docker build -t azure-openclaw-analyst:test agents/analyst
+docker build -t azure-openclaw-openclaw:test agents/openclaw
 ```
 
 Run a local smoke test:
@@ -117,6 +126,18 @@ curl http://localhost:18080/health
 ```
 
 The health endpoint should return HTTP `200` with a JSON status payload.
+
+## Generic OpenClaw App Count
+
+The `openclawContainerAppCount` Bicep parameter controls how many generic OpenClaw Container Apps are created in each environment.
+
+| Count | Dev apps | Prod apps |
+|---|---|---|
+| `0` | none | none |
+| `1` | `openclaw-1-dev` | `openclaw-1-prod` |
+| `3` | `openclaw-1-dev`, `openclaw-2-dev`, `openclaw-3-dev` | `openclaw-1-prod`, `openclaw-2-prod`, `openclaw-3-prod` |
+
+The workflow input is named `openclaw_container_app_count`. Keep the infra and deploy workflow values aligned.
 
 ## Security
 
@@ -142,6 +163,14 @@ The repo includes `.gitignore` rules for common local secret files and generated
 
 By default rollback uses the shared ACR name `ocrocagentdev`. Override it with `ACR_NAME` if you provisioned a different registry name.
 
+For numbered generic OpenClaw apps, pass the app base name and environment:
+
+```bash
+./scripts/rollback.sh openclaw-1 dev oc-abc1234def
+```
+
+The rollback script maps `openclaw-1`, `openclaw-2`, and other numbered OpenClaw apps back to the shared `openclaw` image repository.
+
 ## Adding a New Agent
 
 1. Create `agents/<name>/` with `Dockerfile`, `src/`, `config/`
@@ -149,3 +178,5 @@ By default rollback uses the shared ACR name `ocrocagentdev`. Override it with `
 3. Add the agent name to the matrix in `openclaw-deploy.yml`
 4. Run the `openclaw-infra` workflow to create the new Container App
 5. Deploy via the `openclaw-deploy` workflow
+
+For generic OpenClaw capacity, prefer increasing `openclaw_container_app_count` instead of adding named agents.
