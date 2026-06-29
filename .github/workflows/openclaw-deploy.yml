@@ -2,6 +2,11 @@ name: openclaw-deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      openclaw_container_app_count:
+        description: Number of generic OpenClaw Container Apps deployed per environment
+        required: true
+        default: "0"
 
 permissions:
   id-token: write
@@ -18,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        agent: [hermes, analyst]
+        agent: [hermes, analyst, openclaw]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -37,7 +42,7 @@ jobs:
         run: |
           ACR_LOGIN_SERVER=$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)
           IMAGE="${ACR_LOGIN_SERVER}/${{ matrix.agent }}:${IMAGE_TAG}"
-          docker build --pull -t "${IMAGE}" "agents/${{ matrix.agent }}"
+          docker build --pull -f "agents/${{ matrix.agent }}/Dockerfile" -t "${IMAGE}" .
           docker push "${IMAGE}"
 
   deploy-dev:
@@ -66,6 +71,13 @@ jobs:
 
           APP="${{ matrix.agent }}-dev"
           IMAGE="${ACR_LOGIN_SERVER}/${{ matrix.agent }}:${IMAGE_TAG}"
+          A2A_PEER_NAMES="hermes,analyst"
+          COUNT="${{ inputs.openclaw_container_app_count }}"
+          if [ "${COUNT}" -gt 0 ]; then
+            for index in $(seq 1 "${COUNT}"); do
+              A2A_PEER_NAMES="${A2A_PEER_NAMES},openclaw-${index}"
+            done
+          fi
 
           az containerapp registry set \
             --name "${APP}" \
@@ -83,7 +95,7 @@ jobs:
             --name "${APP}" \
             --resource-group "${RESOURCE_GROUP_DEV}" \
             --image "${IMAGE}" \
-            --set-env-vars AGENT_NAME="${{ matrix.agent }}" PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token
+            --set-env-vars AGENT_NAME="${{ matrix.agent }}" ENVIRONMENT_NAME=dev PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token A2A_SHARED_TOKEN=secretref:openclaw-gateway-token A2A_USE_DAPR=true A2A_PEER_NAMES="${A2A_PEER_NAMES}"
 
       - name: Smoke test dev
         run: |
@@ -94,9 +106,68 @@ jobs:
             -o tsv)
           bash smoke-tests/smoke-dev.sh "${{ matrix.agent }}" "${FQDN}"
 
+  deploy-openclaw-dev:
+    runs-on: ubuntu-latest
+    needs: build
+    if: ${{ fromJSON(inputs.openclaw_container_app_count) > 0 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Azure login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy generic OpenClaw dev Container Apps
+        run: |
+          ACR_LOGIN_SERVER=$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)
+          ACR_USERNAME=$(az acr credential show --name "${ACR_NAME}" --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show --name "${ACR_NAME}" --query "passwords[0].value" -o tsv)
+          echo "::add-mask::${ACR_PASSWORD}"
+
+          IMAGE="${ACR_LOGIN_SERVER}/openclaw:${IMAGE_TAG}"
+          COUNT="${{ inputs.openclaw_container_app_count }}"
+          A2A_PEER_NAMES="hermes,analyst"
+          for peer_index in $(seq 1 "${COUNT}"); do
+            A2A_PEER_NAMES="${A2A_PEER_NAMES},openclaw-${peer_index}"
+          done
+
+          for index in $(seq 1 "${COUNT}"); do
+            APP="openclaw-${index}-dev"
+
+            az containerapp registry set \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_DEV}" \
+              --server "${ACR_LOGIN_SERVER}" \
+              --username "${ACR_USERNAME}" \
+              --password "${ACR_PASSWORD}"
+
+            az containerapp secret set \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_DEV}" \
+              --secrets openclaw-gateway-token="${{ secrets.OPENCLAW_GATEWAY_TOKEN }}"
+
+            az containerapp update \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_DEV}" \
+              --image "${IMAGE}" \
+              --set-env-vars AGENT_NAME="openclaw-${index}" ENVIRONMENT_NAME=dev PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token A2A_SHARED_TOKEN=secretref:openclaw-gateway-token A2A_USE_DAPR=true A2A_PEER_NAMES="${A2A_PEER_NAMES}"
+
+            FQDN=$(az containerapp show \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_DEV}" \
+              --query properties.configuration.ingress.fqdn \
+              -o tsv)
+            bash smoke-tests/smoke-dev.sh "openclaw-${index}" "${FQDN}"
+          done
+
   deploy-prod:
     runs-on: ubuntu-latest
-    needs: deploy-dev
+    needs: [deploy-dev, deploy-openclaw-dev]
+    if: ${{ always() && needs.deploy-dev.result == 'success' && (needs.deploy-openclaw-dev.result == 'success' || needs.deploy-openclaw-dev.result == 'skipped') }}
     environment: prod
     strategy:
       matrix:
@@ -121,6 +192,13 @@ jobs:
 
           APP="${{ matrix.agent }}-prod"
           IMAGE="${ACR_LOGIN_SERVER}/${{ matrix.agent }}:${IMAGE_TAG}"
+          A2A_PEER_NAMES="hermes,analyst"
+          COUNT="${{ inputs.openclaw_container_app_count }}"
+          if [ "${COUNT}" -gt 0 ]; then
+            for index in $(seq 1 "${COUNT}"); do
+              A2A_PEER_NAMES="${A2A_PEER_NAMES},openclaw-${index}"
+            done
+          fi
 
           az containerapp registry set \
             --name "${APP}" \
@@ -138,7 +216,7 @@ jobs:
             --name "${APP}" \
             --resource-group "${RESOURCE_GROUP_PROD}" \
             --image "${IMAGE}" \
-            --set-env-vars AGENT_NAME="${{ matrix.agent }}" PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token
+            --set-env-vars AGENT_NAME="${{ matrix.agent }}" ENVIRONMENT_NAME=prod PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token A2A_SHARED_TOKEN=secretref:openclaw-gateway-token A2A_USE_DAPR=true A2A_PEER_NAMES="${A2A_PEER_NAMES}"
 
       - name: Smoke test prod
         run: |
@@ -148,3 +226,62 @@ jobs:
             --query properties.configuration.ingress.fqdn \
             -o tsv)
           bash smoke-tests/smoke-prod.sh "${{ matrix.agent }}" "${FQDN}"
+
+  deploy-openclaw-prod:
+    runs-on: ubuntu-latest
+    needs: [deploy-prod, deploy-openclaw-dev]
+    if: ${{ fromJSON(inputs.openclaw_container_app_count) > 0 && needs.deploy-prod.result == 'success' }}
+    environment: prod
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Azure login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy generic OpenClaw prod Container Apps
+        run: |
+          ACR_LOGIN_SERVER=$(az acr show --name "${ACR_NAME}" --query loginServer -o tsv)
+          ACR_USERNAME=$(az acr credential show --name "${ACR_NAME}" --query username -o tsv)
+          ACR_PASSWORD=$(az acr credential show --name "${ACR_NAME}" --query "passwords[0].value" -o tsv)
+          echo "::add-mask::${ACR_PASSWORD}"
+
+          IMAGE="${ACR_LOGIN_SERVER}/openclaw:${IMAGE_TAG}"
+          COUNT="${{ inputs.openclaw_container_app_count }}"
+          A2A_PEER_NAMES="hermes,analyst"
+          for peer_index in $(seq 1 "${COUNT}"); do
+            A2A_PEER_NAMES="${A2A_PEER_NAMES},openclaw-${peer_index}"
+          done
+
+          for index in $(seq 1 "${COUNT}"); do
+            APP="openclaw-${index}-prod"
+
+            az containerapp registry set \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_PROD}" \
+              --server "${ACR_LOGIN_SERVER}" \
+              --username "${ACR_USERNAME}" \
+              --password "${ACR_PASSWORD}"
+
+            az containerapp secret set \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_PROD}" \
+              --secrets openclaw-gateway-token="${{ secrets.OPENCLAW_GATEWAY_TOKEN }}"
+
+            az containerapp update \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_PROD}" \
+              --image "${IMAGE}" \
+              --set-env-vars AGENT_NAME="openclaw-${index}" ENVIRONMENT_NAME=prod PORT=8080 OPENCLAW_GATEWAY_PORT=19001 OPENCLAW_GATEWAY_TOKEN=secretref:openclaw-gateway-token A2A_SHARED_TOKEN=secretref:openclaw-gateway-token A2A_USE_DAPR=true A2A_PEER_NAMES="${A2A_PEER_NAMES}"
+
+            FQDN=$(az containerapp show \
+              --name "${APP}" \
+              --resource-group "${RESOURCE_GROUP_PROD}" \
+              --query properties.configuration.ingress.fqdn \
+              -o tsv)
+            bash smoke-tests/smoke-prod.sh "openclaw-${index}" "${FQDN}"
+          done

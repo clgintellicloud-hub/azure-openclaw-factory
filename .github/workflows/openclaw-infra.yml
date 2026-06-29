@@ -14,6 +14,10 @@ on:
       service_principal_object_id:
         description: Object ID of the GitHub Actions service principal
         required: true
+      openclaw_container_app_count:
+        description: Number of generic OpenClaw Container Apps to create per environment
+        required: true
+        default: "0"
 
 permissions:
   id-token: write
@@ -42,7 +46,7 @@ jobs:
             --name openclaw-services-${{ github.run_number }} \
             --location "${{ inputs.location }}" \
             --template-file infra/bicep/main.bicep \
-            --parameters location="${{ inputs.location }}" acrSku="${{ inputs.acr_sku }}" acrName="${ACR_NAME}"
+            --parameters location="${{ inputs.location }}" acrSku="${{ inputs.acr_sku }}" acrName="${ACR_NAME}" openclawContainerAppCount="${{ inputs.openclaw_container_app_count }}"
 
       - name: Provision IAM
         run: |

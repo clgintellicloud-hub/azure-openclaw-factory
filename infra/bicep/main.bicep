@@ -31,6 +31,10 @@ param agentNames array = [
   'analyst'
 ]
 
+@minValue(0)
+@description('Number of generic OpenClaw Container Apps to create per environment. Apps are named openclaw-1-<env>, openclaw-2-<env>, and so on.')
+param openclawContainerAppCount int = 0
+
 @description('Log Analytics workspace name')
 param logAnalyticsName string = 'oclaw-logs'
 
@@ -108,6 +112,7 @@ module containerAppsDev './modules/container-apps.bicep' = {
   scope: rgDev
   params: {
     agentNames: agentNames
+    openclawContainerAppCount: openclawContainerAppCount
     environmentSuffix: 'dev'
     acaEnvName: acaEnvDevName
     location: location
@@ -125,6 +130,7 @@ module containerAppsProd './modules/container-apps.bicep' = {
   scope: rgProd
   params: {
     agentNames: agentNames
+    openclawContainerAppCount: openclawContainerAppCount
     environmentSuffix: 'prod'
     acaEnvName: acaEnvProdName
     location: location

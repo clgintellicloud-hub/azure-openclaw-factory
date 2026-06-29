@@ -9,10 +9,10 @@ RUN npm install -g "openclaw@${OPENCLAW_VERSION}" \
 
 # Copy shared agent source and agent-specific config
 COPY agents/common/src/ ./src/
-COPY agents/analyst/config/ ./config/
+COPY agents/openclaw/config/ ./config/
 
 # Default agent entrypoint
-ENV AGENT_NAME=analyst
+ENV AGENT_NAME=openclaw
 ENV AGENT_CONFIG=/app/config/openclaw.json
 ENV PORT=8080
 ENV OPENCLAW_GATEWAY_PORT=19001
