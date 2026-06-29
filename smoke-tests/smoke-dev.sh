@@ -27,7 +27,7 @@ fi
 echo "Checking A2A agent card at https://${DEV_FQDN}/.well-known/agent-card.json ..."
 CARD_STATUS=$(curl -sk -o /tmp/a2a-card-dev.json -w "%{http_code}" "https://${DEV_FQDN}/.well-known/agent-card.json" || true)
 
-if [[ "${CARD_STATUS}" == "200" ]] && grep -q '"messageSend"' /tmp/a2a-card-dev.json; then
+if [[ "${CARD_STATUS}" == "200" ]] && grep -q '"messageSend"' /tmp/a2a-card-dev.json && grep -q '"messageStream"' /tmp/a2a-card-dev.json; then
   echo "OK: Dev A2A agent card passed (HTTP ${CARD_STATUS})"
 else
   echo "ERROR: Dev A2A agent card failed (HTTP ${CARD_STATUS})"

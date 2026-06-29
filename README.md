@@ -12,15 +12,12 @@ agents/
     src/agent.js
   hermes/                # Hermes agent
     Dockerfile
-    src/agent.js
     config/openclaw.json
   analyst/               # Analyst agent
     Dockerfile
-    src/agent.js
     config/openclaw.json
   openclaw/               # Generic OpenClaw agent image used by count-based apps
     Dockerfile
-    src/agent.js
     config/openclaw.json
 infra/
   bicep/                 # Infrastructure as Code (services)
@@ -112,13 +109,15 @@ Each Container App now exposes A2A-compatible HTTP endpoints from the shared lau
 |---|---|
 | `GET /.well-known/agent-card.json` | Public discovery document with agent metadata, skills, auth, and message endpoint |
 | `POST /message:send` | Authenticated A2A message send endpoint |
+| `POST /message:stream` | Authenticated A2A Server-Sent Events stream for task state updates |
 | `POST /a2a` | Authenticated JSON-RPC compatibility endpoint for `message/send`, `tasks/get`, and `tasks/cancel` |
 | `GET /tasks` | Authenticated in-memory task list |
 | `GET /tasks/<id>` | Authenticated task lookup |
+| `GET /tasks/<id>/events` | Authenticated Server-Sent Events subscription for task updates |
 | `POST /tasks/<id>/cancel` | Authenticated task cancellation |
 | `GET /a2a/peers` | Authenticated view of configured peer agents |
 
-The deployment enables Dapr on every Container App and uses Dapr service invocation for app-to-app calls inside the same Container Apps environment. The `A2A_PEER_NAMES` environment variable is generated during deployment from the fixed agents plus the configured generic OpenClaw app count.
+The deployment enables Dapr on every Container App and uses Dapr service invocation for app-to-app calls inside the same Container Apps environment. JSON-RPC remains available at `/a2a`; Dapr is only the Azure-internal transport between Container Apps. The `A2A_PEER_NAMES` environment variable is generated during deployment from the fixed agents plus the configured generic OpenClaw app count.
 
 Authenticated A2A calls use the `A2A_SHARED_TOKEN` environment variable. The workflow sets it from the existing `OPENCLAW_GATEWAY_TOKEN` GitHub Actions secret, so no additional secret is committed or required by default.
 
@@ -131,6 +130,11 @@ curl -s http://localhost:18080/message:send \
   -H "Authorization: Bearer local-test-token" \
   -H "Content-Type: application/json" \
   -d '{"message":{"role":"user","parts":[{"kind":"text","text":"hello"}]}}'
+
+curl -N http://localhost:18080/message:stream \
+  -H "Authorization: Bearer local-test-token" \
+  -H "Content-Type: application/json" \
+  -d '{"message":{"role":"user","parts":[{"kind":"text","text":"stream hello"}]}}'
 ```
 
 When deploying generic OpenClaw apps, use the same `openclaw_container_app_count` value that was used by the infrastructure workflow so the deploy workflow updates every numbered app that exists.

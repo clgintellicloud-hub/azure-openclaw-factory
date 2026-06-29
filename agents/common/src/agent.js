@@ -13,6 +13,8 @@ const containerAppsDomain = process.env.CONTAINER_APP_ENV_DNS_SUFFIX || "";
 const peerNames = parseCsv(process.env.A2A_PEER_NAMES || "");
 const explicitPeers = parsePeerMap(process.env.A2A_PEERS || "");
 const tasks = new Map();
+const taskEvents = new Map();
+const taskSubscribers = new Map();
 
 console.log(`${agentName} agent starting OpenClaw Gateway on port ${gatewayPort}`);
 
@@ -87,10 +89,22 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    const taskEventsMatch = url.pathname.match(/^\/tasks\/([^/]+)\/events$/);
+    if (taskEventsMatch && req.method === "GET") {
+      if (!authorize(req)) return unauthorized(res);
+      return streamTaskEvents(decodeURIComponent(taskEventsMatch[1]), req, res);
+    }
+
     if (req.method === "POST" && (url.pathname === "/message:send" || url.pathname === "/a2a/message:send")) {
       if (!authorize(req)) return unauthorized(res);
       const body = await readJson(req);
       return sendJson(res, 200, await handleMessageSend(body));
+    }
+
+    if (req.method === "POST" && (url.pathname === "/message:stream" || url.pathname === "/a2a/message:stream")) {
+      if (!authorize(req)) return unauthorized(res);
+      const body = await readJson(req);
+      return handleMessageStream(body, req, res);
     }
 
     if (req.method === "POST" && url.pathname === "/a2a") {
@@ -136,7 +150,7 @@ function buildAgentCard(req) {
     protocolVersion: "0.3.0",
     preferredTransport: "HTTP+JSON",
     capabilities: {
-      streaming: false,
+      streaming: true,
       pushNotifications: false,
       stateTransitionHistory: true,
     },
@@ -164,6 +178,7 @@ function buildAgentCard(req) {
     supportsAuthenticatedExtendedCard: false,
     endpoints: {
       messageSend: `${baseUrl}/message:send`,
+      messageStream: `${baseUrl}/message:stream`,
       jsonRpc: `${baseUrl}/a2a`,
       tasks: `${baseUrl}/tasks`,
     },
@@ -194,6 +209,17 @@ async function handleJsonRpc(rpc) {
       return { jsonrpc: "2.0", id, result: await handleMessageSend(rpc.params || {}) };
     }
 
+    if (rpc.method === "message/stream" || rpc.method === "message:stream") {
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32002,
+          message: "Use POST /message:stream for Server-Sent Events streaming.",
+        },
+      };
+    }
+
     if (rpc.method === "tasks/get") {
       const taskId = rpc.params?.id || rpc.params?.taskId;
       const task = tasks.get(taskId);
@@ -217,7 +243,7 @@ function createTask(message, metadata) {
   const taskId = metadata.taskId || randomUUID();
   const text = extractText(message);
 
-  return {
+  const task = {
     id: taskId,
     contextId: metadata.contextId || randomUUID(),
     kind: "task",
@@ -258,6 +284,9 @@ function createTask(message, metadata) {
       },
     ],
   };
+
+  recordTaskEvent(taskId, "task.completed", task);
+  return task;
 }
 
 function cancelTask(taskId) {
@@ -279,7 +308,200 @@ function cancelTask(taskId) {
     timestamp: new Date().toISOString(),
   };
   tasks.set(taskId, existing);
+  recordTaskEvent(taskId, "task.canceled", existing);
   return existing;
+}
+
+async function handleMessageStream(body, req, res) {
+  const params = body.params || body;
+  const message = normalizeMessage(params.message || params);
+  const metadata = params.metadata || message.metadata || {};
+  const targetAgent = metadata.targetAgent || metadata.target_agent || params.targetAgent;
+
+  if (targetAgent && targetAgent !== agentName) {
+    return streamFromPeer(targetAgent, body, req, res);
+  }
+
+  startSse(res);
+
+  const taskId = metadata.taskId || randomUUID();
+  const contextId = metadata.contextId || randomUUID();
+  const now = new Date().toISOString();
+  const text = extractText(message);
+  const submittedTask = {
+    id: taskId,
+    contextId,
+    kind: "task",
+    status: {
+      state: "submitted",
+      timestamp: now,
+    },
+    history: [
+      {
+        role: "user",
+        parts: message.parts,
+      },
+    ],
+    artifacts: [],
+  };
+
+  tasks.set(taskId, submittedTask);
+  emitTaskUpdate(res, taskId, "task.submitted", submittedTask);
+
+  const workingTask = {
+    ...submittedTask,
+    status: {
+      state: "working",
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "agent",
+        parts: [
+          {
+            kind: "text",
+            text: `${agentName} is processing the message.`,
+          },
+        ],
+      },
+    },
+  };
+
+  tasks.set(taskId, workingTask);
+  emitTaskUpdate(res, taskId, "task.working", workingTask);
+
+  const completedTask = {
+    ...workingTask,
+    status: {
+      state: "completed",
+      timestamp: new Date().toISOString(),
+      message: {
+        role: "agent",
+        parts: [
+          {
+            kind: "text",
+            text: `${agentName} accepted the message${text ? `: ${text}` : "."}`,
+          },
+        ],
+      },
+    },
+    artifacts: [
+      {
+        artifactId: randomUUID(),
+        name: "openclaw-routing-result",
+        parts: [
+          {
+            kind: "data",
+            data: {
+              agent: agentName,
+              environment: environmentName,
+              receivedAt: new Date().toISOString(),
+              openclawGatewayPort: gatewayPort,
+              streamed: true,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  tasks.set(taskId, completedTask);
+  emitTaskUpdate(res, taskId, "task.completed", completedTask);
+  res.end();
+}
+
+async function streamFromPeer(targetAgent, body, req, res) {
+  const peers = buildPeers();
+  const peer = peers.find((item) => item.name === targetAgent || item.appId === targetAgent);
+
+  if (!peer) {
+    startSse(res);
+    writeSse(res, "error", {
+      error: { code: "peer_not_configured", message: `Peer ${targetAgent} is not configured.` },
+    });
+    return res.end();
+  }
+
+  const response = await fetch(peer.messageStreamUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(a2aToken ? { authorization: `Bearer ${a2aToken}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    startSse(res);
+    writeSse(res, "error", {
+      error: { code: "peer_stream_failed", message: `Peer ${targetAgent} returned HTTP ${response.status}.` },
+    });
+    return res.end();
+  }
+
+  res.writeHead(200, sseHeaders());
+  const reader = response.body.getReader();
+
+  while (!res.destroyed && !res.writableEnded) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    res.write(Buffer.from(value));
+  }
+
+  res.end();
+}
+
+function streamTaskEvents(taskId, req, res) {
+  startSse(res);
+
+  for (const event of taskEvents.get(taskId) || []) {
+    writeSse(res, event.event, event.data);
+  }
+
+  const subscribers = taskSubscribers.get(taskId) || new Set();
+  subscribers.add(res);
+  taskSubscribers.set(taskId, subscribers);
+
+  req.on("close", () => {
+    subscribers.delete(res);
+    if (subscribers.size === 0) taskSubscribers.delete(taskId);
+  });
+}
+
+function emitTaskUpdate(res, taskId, event, task) {
+  recordTaskEvent(taskId, event, task);
+  writeSse(res, event, task);
+}
+
+function recordTaskEvent(taskId, event, data) {
+  const events = taskEvents.get(taskId) || [];
+  events.push({
+    event,
+    data,
+    recordedAt: new Date().toISOString(),
+  });
+  taskEvents.set(taskId, events.slice(-50));
+
+  for (const subscriber of taskSubscribers.get(taskId) || []) {
+    writeSse(subscriber, event, data);
+  }
+}
+
+function startSse(res) {
+  res.writeHead(200, sseHeaders());
+  res.write(": connected\n\n");
+}
+
+function sseHeaders() {
+  return {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  };
+}
+
+function writeSse(res, event, data) {
+  res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 async function forwardToPeer(targetAgent, body) {
@@ -315,13 +537,16 @@ function buildPeers() {
     const appId = appIdFor(name);
     const baseUrl = explicitPeers[name] || peerBaseUrl(name, appId);
 
-    return {
+      return {
       name,
       appId,
       baseUrl,
       messageSendUrl: a2aUseDapr
         ? `http://localhost:${daprHttpPort}/v1.0/invoke/${appId}/method/message:send`
         : `${baseUrl}/message:send`,
+      messageStreamUrl: a2aUseDapr
+        ? `http://localhost:${daprHttpPort}/v1.0/invoke/${appId}/method/message:stream`
+        : `${baseUrl}/message:stream`,
     };
   });
 }
